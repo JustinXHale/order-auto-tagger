@@ -9,6 +9,7 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import db from "../db.server";
+import { evaluateTagRules } from "../lib/evaluateTagRules";
 
 export type RuleRow = {
   id: string;
@@ -59,10 +60,101 @@ function parseTagsInput(raw: string): string[] {
 }
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
+
+  if (intent === "backfill") {
+    const rules = await db.tagRule.findMany({ where: { shop, enabled: true } });
+    if (rules.length === 0) {
+      return { ok: true as const, backfill: { processed: 0, tagged: 0 } };
+    }
+
+    let cursor: string | null = null;
+    let hasNextPage = true;
+    let processed = 0;
+    let tagged = 0;
+
+    while (hasNextPage) {
+      const res = await admin.graphql(
+        `#graphql
+          query BackfillOrders($first: Int!, $after: String) {
+            orders(first: $first, after: $after) {
+              edges {
+                cursor
+                node {
+                  id
+                  createdAt
+                  lineItems(first: 50) {
+                    edges {
+                      node {
+                        product { id }
+                      }
+                    }
+                  }
+                }
+              }
+              pageInfo { hasNextPage }
+            }
+          }`,
+        { variables: { first: 50, ...(cursor ? { after: cursor } : {}) } },
+      );
+
+      const body = (await res.json()) as {
+        data?: {
+          orders?: {
+            edges: Array<{
+              cursor: string;
+              node: {
+                id: string;
+                createdAt: string;
+                lineItems: {
+                  edges: Array<{ node: { product: { id: string } | null } }>;
+                };
+              };
+            }>;
+            pageInfo: { hasNextPage: boolean };
+          };
+        };
+      };
+
+      const edges = body?.data?.orders?.edges ?? [];
+      hasNextPage = body?.data?.orders?.pageInfo?.hasNextPage ?? false;
+
+      for (const edge of edges) {
+        cursor = edge.cursor;
+        const node = edge.node;
+        processed++;
+
+        const payload = {
+          id: node.id,
+          created_at: node.createdAt,
+          line_items: node.lineItems.edges.map((li) => ({
+            product_id: li.node.product?.id
+              ? li.node.product.id.replace("gid://shopify/Product/", "")
+              : null,
+          })),
+        };
+
+        const tags = evaluateTagRules(payload, rules);
+        if (tags.length > 0) {
+          await admin.graphql(
+            `#graphql
+              mutation BackfillTagsAdd($id: ID!, $tags: [String!]!) {
+                tagsAdd(id: $id, tags: $tags) {
+                  userErrors { field message }
+                }
+              }`,
+            { variables: { id: node.id, tags } },
+          );
+          tagged++;
+        }
+      }
+    }
+
+    return { ok: true as const, backfill: { processed, tagged } };
+  }
 
   if (intent === "delete") {
     const id = String(formData.get("id") ?? "");
@@ -167,6 +259,7 @@ export default function TagRulesIndex() {
   const { rules } = useLoaderData<typeof loader>();
   const ruleFetcher = useFetcher<typeof action>();
   const deleteFetcher = useFetcher<typeof action>();
+  const backfillFetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -260,6 +353,15 @@ export default function TagRulesIndex() {
     }
     setProductIds(Array.from(next));
   };
+
+  const backfillRunning =
+    backfillFetcher.state === "submitting" ||
+    backfillFetcher.state === "loading";
+
+  const backfillResult =
+    backfillFetcher.data?.ok === true && "backfill" in backfillFetcher.data
+      ? backfillFetcher.data.backfill
+      : null;
 
   const busy =
     ruleFetcher.state === "submitting" ||
@@ -359,6 +461,38 @@ export default function TagRulesIndex() {
             ))}
           </s-stack>
         )}
+      </s-section>
+
+      <s-section heading="Backfill past orders">
+        <s-paragraph>
+          Run your enabled rules against all existing orders. Tags are added to
+          any order that matches — already-tagged orders are unaffected. This
+          may take a moment for larger order histories.
+        </s-paragraph>
+        <s-stack direction="block" gap="small">
+          <backfillFetcher.Form method="post">
+            <input type="hidden" name="intent" value="backfill" />
+            <s-button
+              type="submit"
+              variant="primary"
+              disabled={backfillRunning || busy}
+            >
+              {backfillRunning ? "Running backfill…" : "Run backfill"}
+            </s-button>
+          </backfillFetcher.Form>
+          {backfillResult ? (
+            <s-paragraph>
+              Done — checked {backfillResult.processed} orders, tagged{" "}
+              {backfillResult.tagged}.
+            </s-paragraph>
+          ) : null}
+          {backfillFetcher.data?.ok === false &&
+          "error" in backfillFetcher.data ? (
+            <s-paragraph color="critical">
+              {backfillFetcher.data.error}
+            </s-paragraph>
+          ) : null}
+        </s-stack>
       </s-section>
 
       <s-section heading={editingId ? "Edit rule" : "Create rule"}>
