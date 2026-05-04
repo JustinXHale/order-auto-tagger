@@ -5,20 +5,24 @@ This app tags **orders** when they are created: you define per-store **rules** (
 ### Run locally and install on a dev store
 
 1. `cd order-auto-tagger && npm install`
-2. `npx prisma migrate dev` (first time) or `npx prisma migrate deploy` — creates/updates SQLite including `TagRule` and `Session` tables.
-3. `npm run dev` (runs `shopify app dev`). Log in to Shopify CLI if prompted; link this folder to your Dev Dashboard app if prompted (`shopify app config link`).
-4. Open the preview URL from the CLI (or press **P**), then **Install** on a **development store**.
-5. Open **Tag rules**, create a rule (products via **Browse products**, comma-separated tags, optional start/end), save.
-6. Place a **test order** that includes a selected product within the date window. Check **Orders** in Admin — the order should show the new tags.
+2. **PostgreSQL for local dev** — either create [`.env`](.env.example) with **`DATABASE_URL`**, or rely on the default in [`scripts/ensure-local-database-url.mjs`](scripts/ensure-local-database-url.mjs) and start Postgres, for example:  
+   `docker run -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=order_auto_tagger -p 5432:5432 -d postgres:16`
+3. `npx prisma migrate dev` (first time) or `npx prisma migrate deploy` — applies migrations for `Session` and `TagRule`.
+4. `npm run dev` (runs `shopify app dev`). Log in to Shopify CLI if prompted; link this folder to your Dev Dashboard app if prompted (`shopify app config link`).
+5. Open the preview URL from the CLI (or press **P**), then **Install** on a **development store**.
+6. Open **Tag rules**, create a rule (products via **Browse products**, comma-separated tags, optional start/end), save.
+7. Place a **test order** that includes a selected product within the date window. Check **Orders** in Admin — the order should show the new tags.
 
 After changing scopes or webhooks in [`shopify.app.toml`](shopify.app.toml), let the CLI sync config or run `npm run deploy`. Merchants may need to approve updated permissions or reinstall.
 
 ### Production deployment checklist
 
+Step-by-step **Railway** (CLI + optional GitHub): see [`docs/RAILWAY.md`](docs/RAILWAY.md).
+
 - **Host** the Node process behind **HTTPS** (required for webhooks and OAuth). Examples: [Shopify deployment docs](https://shopify.dev/docs/apps/launch/deployment), Fly.io, Render, Railway, Google Cloud Run.
 - **Environment**: `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SCOPES` (comma-separated; must match [`shopify.app.toml`](shopify.app.toml) — includes `read_orders`, `write_orders`, `read_products` for tagging and the product picker), `SHOPIFY_APP_URL` (public app URL). Use `shopify app env` locally to inspect names your CLI expects.
-- **Database**: Switch Prisma from SQLite to **PostgreSQL** (or another server DB) for multiple instances or persistent hosting; set `DATABASE_URL` and run `npx prisma migrate deploy` in release/start.
-- **Build**: `npm run build` then `npm run start` (or your host’s start command). Run `npx prisma migrate deploy` before or as part of startup.
+- **Database**: Prisma uses **PostgreSQL** via **`DATABASE_URL`**. On Railway, attach Postgres and reference its URL on your web service. Startup runs migrations via [`railway.toml`](railway.toml) → `npm run docker-start`.
+- **Build**: `npm run build` (includes `prisma generate`). Production **start** should run migrations then serve — this repo uses `docker-start` (`setup` + `start`).
 - **Register app URL with Shopify**: `npm run deploy` / `shopify app deploy` so [`shopify.app.toml`](shopify.app.toml) (webhooks, scopes) syncs to your app version.
 - **Each store** that needs tagging must **install** the app; rules are isolated per `shop` domain.
 
