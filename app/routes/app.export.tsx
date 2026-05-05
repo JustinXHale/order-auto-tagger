@@ -12,13 +12,14 @@ import db from "../db.server";
 
 // ── GraphQL types ────────────────────────────────────────────────────────────
 
-type GqlProperty = { name: string; value: string };
+// Shopify Admin GraphQL uses `customAttributes` (key/value) on LineItem, not `properties`
+type GqlAttribute = { key: string; value: string };
 
 type GqlLineItem = {
   title: string;
   quantity: number;
   variant: { title: string } | null;
-  properties: GqlProperty[];
+  customAttributes: GqlAttribute[];
 };
 
 type GqlOrder = {
@@ -68,10 +69,10 @@ function discoverPropertyNames(orders: GqlOrder[]): string[] {
   const seen = new Set<string>();
   for (const order of orders) {
     for (const { node: li } of order.lineItems.edges) {
-      for (const prop of li.properties) {
-        if (!seen.has(prop.name)) {
-          seen.add(prop.name);
-          names.push(prop.name);
+      for (const attr of li.customAttributes) {
+        if (!seen.has(attr.key)) {
+          seen.add(attr.key);
+          names.push(attr.key);
         }
       }
     }
@@ -117,7 +118,7 @@ function buildCsv(
       : "";
 
     for (const { node: li } of order.lineItems.edges) {
-      const propMap = new Map(li.properties.map((p) => [p.name, p.value]));
+      const propMap = new Map(li.customAttributes.map((a) => [a.key, a.value]));
       const variantTitle =
         li.variant?.title && li.variant.title !== "Default Title"
           ? li.variant.title
@@ -247,7 +248,7 @@ export const action = async ({
                       title
                       quantity
                       variant { title }
-                      properties { name value }
+                      customAttributes { key value }
                     }
                   }
                 }
