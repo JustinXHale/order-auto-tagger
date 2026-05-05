@@ -5,7 +5,7 @@ This app tags **orders** when they are created: you define per-store **rules** (
 ### Run locally and install on a dev store
 
 1. `cd order-auto-tagger && npm install`
-2. **PostgreSQL for local dev** — either create [`.env`](.env.example) with **`DATABASE_URL`**, or rely on the default in [`scripts/ensure-local-database-url.mjs`](scripts/ensure-local-database-url.mjs) and start Postgres, for example:  
+2. **PostgreSQL for local dev** — either create [`.env`](.env.example) with **`DATABASE_URL`**, or rely on the default applied by [`scripts/with-local-database-url.mjs`](scripts/with-local-database-url.mjs) (used by `shopify app dev` for Prisma) and start Postgres, for example:  
    `docker run -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=order_auto_tagger -p 5432:5432 -d postgres:16`
 3. `npx prisma migrate dev` (first time) or `npx prisma migrate deploy` — applies migrations for `Session` and `TagRule`.
 4. `npm run dev` (runs `shopify app dev`). Log in to Shopify CLI if prompted; link this folder to your Dev Dashboard app if prompted (`shopify app config link`).

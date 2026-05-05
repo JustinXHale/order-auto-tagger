@@ -3,5 +3,5 @@ roles = ["frontend", "backend"]
 webhooks_path = "/webhooks/app/uninstalled"
 
 [commands]
-predev = "node scripts/ensure-local-database-url.mjs && npx prisma generate"
-dev = "node scripts/ensure-local-database-url.mjs && npx prisma migrate deploy && npm exec react-router dev"
+predev = "node scripts/with-local-database-url.mjs npx prisma generate"
+dev = "node scripts/with-local-database-url.mjs npx prisma migrate deploy && npm exec react-router dev"
