@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useLoaderData, useNavigation } from "react-router";
+import { useFetcher, useLoaderData } from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import db from "../db.server";
@@ -37,6 +38,16 @@ type GqlOrdersResponse = {
   };
 };
 
+export type FixedColumnKey = "order" | "customer" | "product" | "variant" | "qty";
+
+const FIXED_LABELS: Record<FixedColumnKey, string> = {
+  order: "Order #",
+  customer: "Customer Name",
+  product: "Product",
+  variant: "Variant",
+  qty: "Qty",
+};
+
 // ── CSV helpers ───────────────────────────────────────────────────────────────
 
 function csvCell(value: string): string {
@@ -44,24 +55,61 @@ function csvCell(value: string): string {
   return /[",\n\r]/.test(escaped) ? `"${escaped}"` : escaped;
 }
 
-function buildCsv(orders: GqlOrder[]): string {
-  // First pass: collect all unique property names in order of first appearance
-  const propNames: string[] = [];
-  const propSet = new Set<string>();
+function parsePropertyWhitelist(raw: string): string[] | null {
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts : null;
+}
+
+function discoverPropertyNames(orders: GqlOrder[]): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
   for (const order of orders) {
     for (const { node: li } of order.lineItems.edges) {
       for (const prop of li.properties) {
-        if (!propSet.has(prop.name)) {
-          propSet.add(prop.name);
-          propNames.push(prop.name);
+        if (!seen.has(prop.name)) {
+          seen.add(prop.name);
+          names.push(prop.name);
         }
       }
     }
   }
+  return names;
+}
 
-  const fixedHeaders = ["Order #", "Customer Name", "Product", "Variant", "Qty"];
-  const allHeaders = [...fixedHeaders, ...propNames];
-  const rows: string[][] = [allHeaders];
+function resolvePropertyColumns(
+  discovered: string[],
+  whitelist: string[] | null,
+): string[] {
+  if (!whitelist) return discovered;
+  const set = new Set(discovered);
+  const out: string[] = [];
+  for (const name of whitelist) {
+    if (set.has(name)) out.push(name);
+  }
+  return out;
+}
+
+function buildCsv(
+  orders: GqlOrder[],
+  fixed: Record<FixedColumnKey, boolean>,
+  propNames: string[],
+): string {
+  const fixedKeys = (
+    Object.entries(fixed) as [FixedColumnKey, boolean][]
+  ).filter(([, on]) => on);
+
+  if (fixedKeys.length === 0 && propNames.length === 0) {
+    return "";
+  }
+
+  const headers: string[] = [
+    ...fixedKeys.map(([k]) => FIXED_LABELS[k]),
+    ...propNames,
+  ];
+  const rows: string[][] = [headers];
 
   for (const order of orders) {
     const customerName = order.billingAddress
@@ -75,17 +123,18 @@ function buildCsv(orders: GqlOrder[]): string {
           ? li.variant.title
           : "";
 
-      const fixedCols = [
-        order.name,
-        customerName,
-        li.title,
-        variantTitle,
-        "1", // always 1 — qty expanded to individual rows
-      ];
+      const fixedValues: Record<FixedColumnKey, string> = {
+        order: order.name,
+        customer: customerName,
+        product: li.title,
+        variant: variantTitle,
+        qty: "1",
+      };
+
+      const fixedCols = fixedKeys.map(([k]) => fixedValues[k]);
       const propCols = propNames.map((n) => propMap.get(n) ?? "");
       const baseRow = [...fixedCols, ...propCols];
 
-      // Expand quantity — one row per unit
       for (let i = 0; i < li.quantity; i++) {
         rows.push(baseRow);
       }
@@ -105,7 +154,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     select: { name: true, tags: true },
   });
 
-  // Suggest tag values from existing rules so the user can pick one quickly
   const tagSuggestions: string[] = [];
   for (const rule of rules) {
     try {
@@ -125,22 +173,58 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
 // ── Action ────────────────────────────────────────────────────────────────────
 
-export const action = async ({ request }: ActionFunctionArgs) => {
+export type ExportActionData =
+  | { ok: true; csv: string; filename: string }
+  | { ok: false; error: string };
+
+function parseBool(v: FormDataEntryValue | null): boolean {
+  const s = String(v ?? "").toLowerCase();
+  return s === "true" || s === "on" || s === "1";
+}
+
+export const action = async ({
+  request,
+}: ActionFunctionArgs): Promise<ExportActionData> => {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
 
   const tagFilter = String(formData.get("tag") ?? "").trim();
   const startDate = String(formData.get("startDate") ?? "").trim();
   const endDate = String(formData.get("endDate") ?? "").trim();
+  const propertyFilterRaw = String(formData.get("propertyFilter") ?? "");
 
-  // Build Shopify order search query string
+  const fixed: Record<FixedColumnKey, boolean> = {
+    order: parseBool(formData.get("includeOrder")),
+    customer: parseBool(formData.get("includeCustomer")),
+    product: parseBool(formData.get("includeProduct")),
+    variant: parseBool(formData.get("includeVariant")),
+    qty: parseBool(formData.get("includeQty")),
+  };
+
+  // Defaults: if nothing sent (old clients), treat as all true
+  const anyFixedSent =
+    formData.has("includeOrder") ||
+    formData.has("includeCustomer") ||
+    formData.has("includeProduct") ||
+    formData.has("includeVariant") ||
+    formData.has("includeQty");
+
+  if (!anyFixedSent) {
+    fixed.order = true;
+    fixed.customer = true;
+    fixed.product = true;
+    fixed.variant = true;
+    fixed.qty = true;
+  }
+
+  const whitelist = parsePropertyWhitelist(propertyFilterRaw);
+
   const queryParts: string[] = [];
   if (tagFilter) queryParts.push(`tag:${tagFilter}`);
   if (startDate) queryParts.push(`created_at:>=${startDate}`);
   if (endDate) queryParts.push(`created_at:<=${endDate}`);
   const queryString = queryParts.join(" ") || undefined;
 
-  // Paginate through all matching orders
   const allOrders: GqlOrder[] = [];
   let cursor: string | null = null;
   let hasNextPage = true;
@@ -191,122 +275,261 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   }
 
-  const csv = buildCsv(allOrders);
+  const discovered = discoverPropertyNames(allOrders);
+  const propColumns = resolvePropertyColumns(discovered, whitelist);
+
+  const hasFixed = Object.values(fixed).some(Boolean);
+  if (!hasFixed && propColumns.length === 0) {
+    return {
+      ok: false,
+      error:
+        "Select at least one column (fixed fields or OPTIS fields), or clear the OPTIS whitelist to include all custom fields.",
+    };
+  }
+
+  const csv = buildCsv(allOrders, fixed, propColumns);
   const filename = tagFilter
     ? `orders-${tagFilter}.csv`
     : "orders-export.csv";
 
-  return new Response(csv, {
-    headers: {
-      "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename="${filename}"`,
-    },
-  });
+  return { ok: true, csv, filename };
 };
 
 // ── UI ────────────────────────────────────────────────────────────────────────
 
 export default function ExportPage() {
   const { tagSuggestions } = useLoaderData<typeof loader>();
-  const navigation = useNavigation();
-  const isExporting = navigation.state === "submitting";
+  const fetcher = useFetcher<ExportActionData>();
+  const shopify = useAppBridge();
+  const outcomeHandledRef = useRef(false);
 
   const [tag, setTag] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [propertyFilter, setPropertyFilter] = useState("");
+
+  const [includeOrder, setIncludeOrder] = useState(true);
+  const [includeCustomer, setIncludeCustomer] = useState(true);
+  const [includeProduct, setIncludeProduct] = useState(true);
+  const [includeVariant, setIncludeVariant] = useState(true);
+  const [includeQty, setIncludeQty] = useState(true);
+
+  const isExporting = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.state === "submitting") {
+      outcomeHandledRef.current = false;
+    }
+  }, [fetcher.state]);
+
+  useEffect(() => {
+    if (fetcher.state !== "idle") return;
+    const data = fetcher.data;
+    if (!data || outcomeHandledRef.current) return;
+    outcomeHandledRef.current = true;
+
+    if (data.ok === true) {
+      const blob = new Blob([data.csv], {
+        type: "text/csv;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = data.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      shopify.toast.show("CSV downloaded");
+      return;
+    }
+
+    if (data.error) {
+      shopify.toast.show(data.error, { isError: true });
+    }
+  }, [fetcher.state, fetcher.data, shopify]);
+
+  const runExport = () => {
+    fetcher.submit(
+      {
+        tag,
+        startDate,
+        endDate,
+        propertyFilter,
+        includeOrder: includeOrder ? "true" : "false",
+        includeCustomer: includeCustomer ? "true" : "false",
+        includeProduct: includeProduct ? "true" : "false",
+        includeVariant: includeVariant ? "true" : "false",
+        includeQty: includeQty ? "true" : "false",
+      },
+      { method: "post" },
+    );
+  };
 
   return (
     <s-page heading="Export orders">
       <s-section heading="Filters">
         <s-paragraph>
-          Filter orders before exporting. All fields are optional — leaving them
-          blank exports every order. The CSV expands quantities so each unit is
-          its own row, and OPTIS custom fields appear as individual columns.
+          Filter which orders to include. Use columns below to choose what
+          appears in the CSV. Leave OPTIS whitelist blank to include every
+          custom field discovered in that export.
         </s-paragraph>
 
-        <form method="post" action="/app/export">
-          <s-stack direction="block" gap="base">
-            <s-stack direction="block" gap="small">
-              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <span>Tag (e.g. 2026-woodlands-summer7s)</span>
-                <input
-                  type="text"
-                  name="tag"
-                  value={tag}
-                  onChange={(e) => setTag(e.target.value)}
-                  placeholder="Leave blank to export all orders"
-                  autoComplete="off"
-                  style={{ padding: "8px", maxWidth: 480 }}
-                />
-              </label>
-              {tagSuggestions.length > 0 && (
-                <s-stack direction="inline" gap="small">
-                  <s-text color="subdued" size="small">
-                    Quick fill:
-                  </s-text>
-                  {tagSuggestions.map((t) => (
-                    <s-button
-                      key={t}
-                      type="button"
-                      onClick={() => setTag(t)}
-                    >
-                      {t}
-                    </s-button>
-                  ))}
-                </s-stack>
-              )}
-            </s-stack>
-
-            <s-stack direction="inline" gap="base">
-              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <span>Start date (optional)</span>
-                <input
-                  type="date"
-                  name="startDate"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                  style={{ padding: "8px" }}
-                />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <span>End date (optional)</span>
-                <input
-                  type="date"
-                  name="endDate"
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                  style={{ padding: "8px" }}
-                />
-              </label>
-            </s-stack>
-
-            <s-button
-              type="submit"
-              variant="primary"
-              disabled={isExporting}
-            >
-              {isExporting ? "Generating CSV…" : "Download CSV"}
-            </s-button>
+        <s-stack direction="block" gap="base">
+          <s-stack direction="block" gap="small">
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span>Tag (optional)</span>
+              <input
+                type="text"
+                value={tag}
+                onChange={(e) => setTag(e.target.value)}
+                placeholder="e.g. 2026-woodlands-summer7s — blank = all orders"
+                autoComplete="off"
+                style={{ padding: "8px", maxWidth: 480 }}
+              />
+            </label>
+            {tagSuggestions.length > 0 && (
+              <s-stack direction="inline" gap="small">
+                <s-text color="subdued">
+                  Quick fill:
+                </s-text>
+                {tagSuggestions.map((t) => (
+                  <s-button
+                    key={t}
+                    type="button"
+                    onClick={() => setTag(t)}
+                  >
+                    {t}
+                  </s-button>
+                ))}
+              </s-stack>
+            )}
           </s-stack>
-        </form>
+
+          <s-stack direction="inline" gap="base">
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span>Start date (optional)</span>
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                style={{ padding: "8px" }}
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span>End date (optional)</span>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                style={{ padding: "8px" }}
+              />
+            </label>
+          </s-stack>
+        </s-stack>
+      </s-section>
+
+      <s-section heading="Columns to export">
+        <s-paragraph color="subdued">
+          Uncheck fields you don&apos;t need. OPTIS line-item properties are
+          listed in the next section.
+        </s-paragraph>
+        <s-stack direction="block" gap="small">
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={includeOrder}
+              onChange={(e) => setIncludeOrder(e.target.checked)}
+              disabled={isExporting}
+            />
+            <span>{FIXED_LABELS.order}</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={includeCustomer}
+              onChange={(e) => setIncludeCustomer(e.target.checked)}
+              disabled={isExporting}
+            />
+            <span>{FIXED_LABELS.customer}</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={includeProduct}
+              onChange={(e) => setIncludeProduct(e.target.checked)}
+              disabled={isExporting}
+            />
+            <span>{FIXED_LABELS.product}</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={includeVariant}
+              onChange={(e) => setIncludeVariant(e.target.checked)}
+              disabled={isExporting}
+            />
+            <span>{FIXED_LABELS.variant}</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={includeQty}
+              onChange={(e) => setIncludeQty(e.target.checked)}
+              disabled={isExporting}
+            />
+            <span>{FIXED_LABELS.qty} (always 1 per row when expanded)</span>
+          </label>
+        </s-stack>
+
+        <label
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+            marginTop: 12,
+          }}
+        >
+          <span>OPTIS fields whitelist (optional)</span>
+          <input
+            type="text"
+            value={propertyFilter}
+            onChange={(e) => setPropertyFilter(e.target.value)}
+            placeholder="Comma-separated: Team Name, Jersey Number — leave blank for ALL fields"
+            autoComplete="off"
+            disabled={isExporting}
+            style={{ padding: "8px", maxWidth: 560 }}
+          />
+        </label>
+
+        <s-stack direction="inline" gap="small">
+          <s-button
+            type="button"
+            variant="primary"
+            onClick={runExport}
+            disabled={isExporting}
+          >
+            {isExporting ? "Generating CSV…" : "Download CSV"}
+          </s-button>
+        </s-stack>
       </s-section>
 
       <s-section slot="aside" heading="How it works">
         <s-stack direction="block" gap="small">
           <s-paragraph>
-            The CSV always includes: <s-text type="strong">Order #</s-text>,{" "}
-            <s-text type="strong">Customer Name</s-text>,{" "}
-            <s-text type="strong">Product</s-text>,{" "}
-            <s-text type="strong">Variant</s-text>, and{" "}
-            <s-text type="strong">Qty</s-text>.
+            Choose filters to limit which orders are fetched. Without a tag or
+            dates, every order in the store is included (large exports).
           </s-paragraph>
           <s-paragraph>
-            OPTIS custom fields (line item properties) are discovered
-            automatically and each appears as its own column.
+            Pick columns above so the CSV only contains what you need for Google
+            Sheets or your factory form.
           </s-paragraph>
           <s-paragraph>
-            Orders with quantity &gt; 1 are expanded — one row per unit —
-            so each row represents a single item ready for your factory form.
+            OPTIS custom fields: leave the whitelist blank to auto-include every
+            property name found in the filtered orders; or list only the names
+            you want as columns.
+          </s-paragraph>
+          <s-paragraph>
+            Quantity &gt; 1 is expanded to one row per unit (Qty column shows{" "}
+            <s-text type="strong">1</s-text> per row).
           </s-paragraph>
         </s-stack>
       </s-section>
