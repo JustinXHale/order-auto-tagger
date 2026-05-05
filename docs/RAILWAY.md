@@ -4,6 +4,8 @@ What happens **without** GitHub connected? Nothing breaks—you deploy by pushin
 
 ## One-time: Postgres + env vars
 
+If Postgres was removed (e.g. during debugging), add it again: **project → + Add → Database → PostgreSQL**. Wait until it shows **Online**, then on your **web** service add **`DATABASE_URL`** via **Reference** to that Postgres service. Redeploy. Data in the old DB is gone unless you have backups.
+
 1. **Create a Railway project** (dashboard or `railway init` in this folder).
 2. Add a **PostgreSQL** database (same project). Railway exposes **`DATABASE_URL`**—attach it to your **web service**:
    - Open your **app service** → **Variables** → add `DATABASE_URL` using **Reference** to your Postgres plugin’s `DATABASE_URL`, or paste the connection string from the Postgres service.

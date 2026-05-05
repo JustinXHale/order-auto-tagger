@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "73825e4334263c19b2da7eea932ae320"
-application_url = "https://example.com"
+application_url = "https://order-auto-tagger-production.up.railway.app"
 embedded = true
 name = "order-auto-tagger"
 
@@ -25,8 +25,7 @@ api_version = "2026-07"
   topics = [ "orders/create" ]
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://order-auto-tagger-production.up.railway.app/auth/callback" ]
 
 [build]
-include_config_on_deploy = true
 automatically_update_urls_on_dev = true
