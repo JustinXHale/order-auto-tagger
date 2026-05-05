@@ -26,6 +26,8 @@ type GqlOrder = {
   id: string;
   name: string;
   createdAt: string;
+  note: string | null;
+  email: string | null;
   billingAddress: { firstName: string; lastName: string } | null;
   lineItems: { edges: Array<{ node: GqlLineItem }> };
 };
@@ -39,14 +41,16 @@ type GqlOrdersResponse = {
   };
 };
 
-export type FixedColumnKey = "order" | "customer" | "product" | "variant" | "qty";
+export type FixedColumnKey = "order" | "customer" | "email" | "product" | "variant" | "qty" | "note";
 
 const FIXED_LABELS: Record<FixedColumnKey, string> = {
   order: "Order #",
   customer: "Customer Name",
+  email: "Email",
   product: "Product",
   variant: "Variant",
   qty: "Qty",
+  note: "Order Note",
 };
 
 // ── CSV helpers ───────────────────────────────────────────────────────────────
@@ -127,9 +131,11 @@ function buildCsv(
       const fixedValues: Record<FixedColumnKey, string> = {
         order: order.name,
         customer: customerName,
+        email: order.email ?? "",
         product: li.title,
         variant: variantTitle,
         qty: "1",
+        note: order.note ?? "",
       };
 
       const fixedCols = fixedKeys.map(([k]) => fixedValues[k]);
@@ -197,25 +203,31 @@ export const action = async ({
   const fixed: Record<FixedColumnKey, boolean> = {
     order: parseBool(formData.get("includeOrder")),
     customer: parseBool(formData.get("includeCustomer")),
+    email: parseBool(formData.get("includeEmail")),
     product: parseBool(formData.get("includeProduct")),
     variant: parseBool(formData.get("includeVariant")),
     qty: parseBool(formData.get("includeQty")),
+    note: parseBool(formData.get("includeNote")),
   };
 
-  // Defaults: if nothing sent (old clients), treat as all true
+  // Defaults: if nothing sent (old clients), treat as all true except note/email
   const anyFixedSent =
     formData.has("includeOrder") ||
     formData.has("includeCustomer") ||
+    formData.has("includeEmail") ||
     formData.has("includeProduct") ||
     formData.has("includeVariant") ||
-    formData.has("includeQty");
+    formData.has("includeQty") ||
+    formData.has("includeNote");
 
   if (!anyFixedSent) {
     fixed.order = true;
     fixed.customer = true;
+    fixed.email = false;
     fixed.product = true;
     fixed.variant = true;
     fixed.qty = true;
+    fixed.note = false;
   }
 
   const whitelist = parsePropertyWhitelist(propertyFilterRaw);
@@ -241,6 +253,8 @@ export const action = async ({
                 id
                 name
                 createdAt
+                note
+                email
                 billingAddress { firstName lastName }
                 lineItems(first: 50) {
                   edges {
@@ -311,9 +325,11 @@ export default function ExportPage() {
 
   const [includeOrder, setIncludeOrder] = useState(true);
   const [includeCustomer, setIncludeCustomer] = useState(true);
+  const [includeEmail, setIncludeEmail] = useState(false);
   const [includeProduct, setIncludeProduct] = useState(true);
   const [includeVariant, setIncludeVariant] = useState(true);
   const [includeQty, setIncludeQty] = useState(true);
+  const [includeNote, setIncludeNote] = useState(false);
 
   const isExporting = fetcher.state !== "idle";
 
@@ -357,9 +373,11 @@ export default function ExportPage() {
         propertyFilter,
         includeOrder: includeOrder ? "true" : "false",
         includeCustomer: includeCustomer ? "true" : "false",
+        includeEmail: includeEmail ? "true" : "false",
         includeProduct: includeProduct ? "true" : "false",
         includeVariant: includeVariant ? "true" : "false",
         includeQty: includeQty ? "true" : "false",
+        includeNote: includeNote ? "true" : "false",
       },
       { method: "post" },
     );
@@ -455,6 +473,15 @@ export default function ExportPage() {
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"
+              checked={includeEmail}
+              onChange={(e) => setIncludeEmail(e.target.checked)}
+              disabled={isExporting}
+            />
+            <span>{FIXED_LABELS.email}</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
               checked={includeProduct}
               onChange={(e) => setIncludeProduct(e.target.checked)}
               disabled={isExporting}
@@ -478,6 +505,15 @@ export default function ExportPage() {
               disabled={isExporting}
             />
             <span>{FIXED_LABELS.qty} (always 1 per row when expanded)</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={includeNote}
+              onChange={(e) => setIncludeNote(e.target.checked)}
+              disabled={isExporting}
+            />
+            <span>{FIXED_LABELS.note}</span>
           </label>
         </s-stack>
 
