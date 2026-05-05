@@ -18,6 +18,7 @@ type GqlAttribute = { key: string; value: string };
 type GqlLineItem = {
   title: string;
   quantity: number;
+  currentQuantity: number;
   variant: { title: string } | null;
   customAttributes: GqlAttribute[];
 };
@@ -73,6 +74,7 @@ function discoverPropertyNames(orders: GqlOrder[]): string[] {
   const seen = new Set<string>();
   for (const order of orders) {
     for (const { node: li } of order.lineItems.edges) {
+      if (li.currentQuantity === 0) continue; // skip removed/fully-refunded items
       for (const attr of li.customAttributes) {
         if (!seen.has(attr.key)) {
           seen.add(attr.key);
@@ -122,6 +124,7 @@ function buildCsv(
       : "";
 
     for (const { node: li } of order.lineItems.edges) {
+      if (li.currentQuantity === 0) continue; // skip removed/fully-refunded items
       const propMap = new Map(li.customAttributes.map((a) => [a.key, a.value]));
       const variantTitle =
         li.variant?.title && li.variant.title !== "Default Title"
@@ -142,7 +145,7 @@ function buildCsv(
       const propCols = propNames.map((n) => propMap.get(n) ?? "");
       const baseRow = [...fixedCols, ...propCols];
 
-      for (let i = 0; i < li.quantity; i++) {
+      for (let i = 0; i < li.currentQuantity; i++) {
         rows.push(baseRow);
       }
     }
@@ -261,6 +264,7 @@ export const action = async ({
                     node {
                       title
                       quantity
+                      currentQuantity
                       variant { title }
                       customAttributes { key value }
                     }
