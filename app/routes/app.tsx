@@ -19,7 +19,7 @@ export default function App() {
     <AppProvider embedded apiKey={apiKey}>
       <s-app-nav>
         <s-link href="/app">Tag rules</s-link>
-        <s-link href="/app/additional">About</s-link>
+        <s-link href="/app/export">Export</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>
